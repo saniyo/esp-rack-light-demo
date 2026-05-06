@@ -6,6 +6,7 @@ import { RequiredChildrenProps, extractErrorMessage } from '../../utils';
 import { FeatureEntry, UiManifest } from '../../types';
 
 import { ManifestContext, ManifestContextValue } from './context';
+import ManifestProgress from './ManifestProgress';
 
 const EMPTY_MANIFEST: UiManifest = {
   schemaVersion: 0,
@@ -19,13 +20,17 @@ const applyManifest = (manifest: UiManifest): void => {
   configureFsEndpoints(fs?.endpoints);
 };
 
-// Non-blocking loader: children always render. If the manifest fetch fails or
-// is delayed, consumers get an empty features[] and should fall back to their
-// hardcoded legacy behavior.
+// Loader keeps the rest of the tree mounted in the background — the
+// ManifestProgress overlay sits on top until the manifest has been
+// fetched AND its module list has finished its staggered reveal,
+// then unmounts. Children always have access to the (initially empty)
+// manifest context, so any module that subscribes survives an
+// inflight fetch without an extra null-check.
 const ManifestLoader: FC<RequiredChildrenProps> = (props) => {
   const [manifest, setManifest] = useState<UiManifest>(EMPTY_MANIFEST);
   const [loaded, setLoaded] = useState<boolean>(false);
   const [error, setError] = useState<string | undefined>();
+  const [revealComplete, setRevealComplete] = useState<boolean>(false);
 
   const loadManifest = useCallback(async () => {
     try {
@@ -57,7 +62,19 @@ const ManifestLoader: FC<RequiredChildrenProps> = (props) => {
     [manifest, loaded, error, findFeature]
   );
 
-  return <ManifestContext.Provider value={value}>{props.children}</ManifestContext.Provider>;
+  return (
+    <ManifestContext.Provider value={value}>
+      {props.children}
+      {!revealComplete && (
+        <ManifestProgress
+          loaded={loaded}
+          manifest={manifest}
+          error={error}
+          onRevealComplete={() => setRevealComplete(true)}
+        />
+      )}
+    </ManifestContext.Provider>
+  );
 };
 
 export default ManifestLoader;
