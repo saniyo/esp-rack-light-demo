@@ -5,9 +5,6 @@ import Sockette from 'sockette';
 import { throttle } from 'lodash';
 import { addAccessTokenParameter } from '../api/authentication';
 
-/**
- * Типи для повідомлень WebSocket
- */
 export interface WebSocketIdMessage {
   type: 'id';
   id: string;
@@ -22,46 +19,48 @@ export interface WebSocketPayloadMessage<D> {
 
 export type WebSocketMessage<D> = WebSocketIdMessage | WebSocketPayloadMessage<D>;
 
-/**
- * Хук useWs: створює та підтримує WebSocket-з'єднання
- * @param wsUrl - адреса WebSocket (з доданим токеном, якщо треба)
- * @param wsThrottle - затримка (ms) для throttle вихідних send'ів
- *                    (drag slider / continuous typing → прибираємо флуд
- *                    напівфабрикатів на бекенд; UI рендериться одразу)
- * @param maxAttempts - максимальна кількість спроб перепідключення
- */
+// How long to wait for a payload message on a `live=true` tab before
+// declaring the connection stale and forcing a reconnect. Background
+// streams (LightState chart at default 100 ms cadence, NTP clock at 1 Hz,
+// MQTT status echoes at ~1 Hz) all comfortably fit this window. Inbound
+// data on a quiet status tab (no chart) is fine — we only arm the
+// watchdog when a payload has actually arrived once, so a tab that's
+// silent by design never trips it.
+const STALE_WATCHDOG_MS = 30_000;
+
+// Sockette retry cap. The legacy 10 was reached within ~50 s and then
+// the socket died for the lifetime of the page; long-running operator
+// sessions hit this routinely after a Wi-Fi blip / device reboot. With
+// Sockette's exponential backoff capped at ~30 s, 10000 attempts means
+// "effectively forever" — the user can always take the tab offline by
+// closing it.
+const RECONNECT_MAX_ATTEMPTS = 10_000;
+
 export const useWs = <D>(
   wsUrl: string,
   wsThrottle: number = 500,
-  maxAttempts: number = 10
+  maxAttempts: number = RECONNECT_MAX_ATTEMPTS
 ) => {
   const ws = useRef<Sockette>();
   const clientId = useRef<string>();
+  const lastMessageAt = useRef<number>(0);
 
-  // Стан з'єднання
   const [connected, setConnected] = useState<boolean>(false);
-  // Поточний originId (отримуємо з повідомлень типу "id")
   const [originId, setOriginId] = useState<string>('');
-  // Основні дані, прийняті через WebSocket (якщо "p" - payload)
   const [wsData, setWsData] = useState<D | undefined>();
 
-  // Контроль передачі (чи зберегти дані на сервер), а також чи чистити локальні дані
+  // Outgoing-state coordination flags (see updateData).
   const [transmit, setTransmit] = useState<boolean>(false);
   const [clear, setClear] = useState<boolean>(false);
 
-  /**
-   * Обробник вхідних повідомлень WebSocket
-   */
   const onMessage = useCallback((event: MessageEvent) => {
     const rawData = event.data;
     if (typeof rawData === 'string') {
       try {
         const message = JSON.parse(rawData) as WebSocketMessage<D>;
-        // No per-message console.log here — at 10 Hz LightState this fires
-        // 36000 times/hour and each entry retains its (trend-bearing)
-        // payload in DevTools forever, snowballing the tab's heap. Add a
-        // temporary log while debugging if you need to inspect traffic.
-
+        // Stamp on EVERY message including 'id' frames so the watchdog
+        // doesn't false-trigger between connect and the first 'p'.
+        lastMessageAt.current = Date.now();
         switch (message.type) {
           case 'id':
             clientId.current = message.id;
@@ -71,7 +70,6 @@ export const useWs = <D>(
             if (message.origin_id) {
               setOriginId(message.origin_id);
             }
-            // Записуємо в локальний стан payload
             setWsData(message.p);
             break;
           default:
@@ -83,12 +81,6 @@ export const useWs = <D>(
     }
   }, []);
 
-  /**
-   * Безпосередня відправка даних — викликається через throttle нижче.
-   * Throttle захищає бекенд від потоку напівзавершеного user input
-   * (drag slider emits ~60 change events/sec → під throttle=500ms
-   * backend побачить максимум 2 msg/s leading+trailing).
-   */
   const doSaveData = useCallback(
     (newData: D, clearData: boolean = false) => {
       if (!ws.current) return;
@@ -100,15 +92,8 @@ export const useWs = <D>(
     []
   );
 
-  // Створюємо throttled-функцію відправки
   const saveData = useRef(throttle(doSaveData, wsThrottle));
 
-  /**
-   * Публічний метод оновлення локального стану та ініціації відправки
-   * @param newData - нові дані (або callback)
-   * @param transmitData - чи відправляти відразу на сервер
-   * @param clearData - чи стирати локальний wsData
-   */
   const updateData = (
     newData: React.SetStateAction<D | undefined>,
     transmitData: boolean = true,
@@ -119,18 +104,30 @@ export const useWs = <D>(
     setClear(clearData);
   };
 
-  /**
-   * Відключення WebSocket
-   */
   const disconnect = useCallback(() => {
     if (ws.current) {
       ws.current.close();
     }
   }, []);
 
-  /**
-   * Ефект відправки даних: якщо transmit = true, викликаємо saveData
-   */
+  // Force a fresh socket — tears down the current Sockette instance and
+  // lets the connect-effect re-run (we re-use the existing wsUrl deps so
+  // bumping a nonce here would be redundant; calling reconnect() drops
+  // the underlying WebSocket which fires onclose → Sockette's own
+  // reconnect kicks immediately, sidestepping the long timeout we'd
+  // otherwise wait through).
+  const forceReconnect = useCallback(() => {
+    const inst = ws.current;
+    if (!inst) return;
+    try {
+      inst.reconnect();
+    } catch {
+      // Older Sockette versions: fall back to close → instance reopens
+      // via its own retry loop.
+      inst.close();
+    }
+  }, []);
+
   useEffect(() => {
     if (!transmit) return;
     if (wsData) {
@@ -140,11 +137,8 @@ export const useWs = <D>(
     setClear(false);
   }, [wsData, transmit, clear]);
 
-  /**
-   * Підключення до WebSocket (та повторні спроби).
-   * Якщо wsUrl пустий — сокет не відкриваємо; це дозволяє викликати useWs
-   * безумовно (в DynamicFeature) і передавати '' коли фіча без WS.
-   */
+  // Connect + register handlers. Empty wsUrl = noop (DynamicFeature
+  // calls useWs unconditionally and passes '' for non-live features).
   useEffect(() => {
     if (!wsUrl) return;
 
@@ -155,34 +149,80 @@ export const useWs = <D>(
       onopen: () => {
         setConnected(true);
         attempts = 0;
+        lastMessageAt.current = Date.now();
         console.log('[useWs] WebSocket connected');
       },
       onclose: () => {
         clientId.current = undefined;
         setConnected(false);
-        setWsData(undefined); // очищуємо локальний wsData
+        setWsData(undefined);
         console.warn('[useWs] WebSocket disconnected');
         attempts++;
         if (attempts > maxAttempts) {
-          console.warn('useWs - Stop attempts! Reached max attempts:', attempts);
+          console.warn('[useWs] Stop attempts! Reached max attempts:', attempts);
         } else {
-          console.log(`useWs - Attempt ${attempts} to reconnect...`);
+          console.log(`[useWs] Attempt ${attempts} to reconnect…`);
         }
       },
       onerror: (error) => {
-        console.error('useWs - WebSocket error:', error);
+        console.error('[useWs] WebSocket error:', error);
       },
       timeout: 5000,
       maxAttempts: maxAttempts,
     });
 
     ws.current = instance;
-
-    // При демонтовані компонента закриваємо WS
     return () => {
       instance.close();
     };
   }, [wsUrl, onMessage, maxAttempts]);
+
+  // Staleness watchdog — covers the "page hung on the live tab forever"
+  // class of bugs where the TCP socket reports `connected=true` but the
+  // device stopped pushing (typical: deep-sleep / brown-out / AsyncWS
+  // backpressure that silently dropped this client). lastMessageAt is
+  // updated on every inbound frame; if we go past the threshold we
+  // force-reconnect. Disabled when wsUrl is empty.
+  useEffect(() => {
+    if (!wsUrl) return;
+    const id = window.setInterval(() => {
+      if (!connected) return;                    // already trying to reconnect
+      if (lastMessageAt.current === 0) return;   // never received a frame yet
+      const stale = Date.now() - lastMessageAt.current;
+      if (stale > STALE_WATCHDOG_MS) {
+        console.warn(`[useWs] Stale WS (${stale} ms since last msg) — forcing reconnect`);
+        lastMessageAt.current = 0;               // reset so next interval doesn't fire again
+        forceReconnect();
+      }
+    }, 5000);
+    return () => window.clearInterval(id);
+  }, [wsUrl, connected, forceReconnect]);
+
+  // Visibility + network resume handlers. Tabs in the background pause
+  // their WS internally on some browsers; coming back to the foreground
+  // after long absence used to leave the socket in a half-broken state
+  // until the user manually refreshed. Here we proactively reconnect on
+  // both visibilitychange (tab focus regained) and `online` (OS-level
+  // network came back) so the recovery is automatic.
+  useEffect(() => {
+    if (!wsUrl) return;
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && !connected) {
+        console.log('[useWs] Tab became visible & WS down → reconnect');
+        forceReconnect();
+      }
+    };
+    const onOnline = () => {
+      console.log('[useWs] Network back online → reconnect');
+      forceReconnect();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('online', onOnline);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('online', onOnline);
+    };
+  }, [wsUrl, connected, forceReconnect]);
 
   return {
     connected,
@@ -190,5 +230,6 @@ export const useWs = <D>(
     wsData,
     updateData,
     disconnect,
+    forceReconnect,
   } as const;
 };

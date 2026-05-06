@@ -70,6 +70,32 @@ export const useRest = <D>({ read, update }: RestRequestOptions<D>) => {
     // when React reused the same DOM slot for a different tab.
   }, [loadData]);
 
+  // Self-healing on focus / network resume. Two failure modes covered:
+  //   * Browser suspended the tab while in background — coming back, the
+  //     last-fetched data may be stale (device rebooted, config changed
+  //     in another session). A silent refetch on visibilitychange brings
+  //     the page back in sync without flickering an empty form.
+  //   * OS-level network outage (Wi-Fi blip, sleep). The `online` event
+  //     fires when connectivity returns; immediate refetch surfaces any
+  //     state that changed during the gap.
+  // Both paths are silent (no spinner, no snackbar) — the data either
+  // updates or stays the same. A failure during the silent refetch is
+  // ignored; the next user interaction will hit the loud path.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        loadData({ silent: true });
+      }
+    };
+    const onOnline = () => loadData({ silent: true });
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('online', onOnline);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('online', onOnline);
+    };
+  }, [loadData]);
+
   // NOTE: no debug log of `data` here — it fires on every REST fetch and the
   // full response is retained by DevTools indefinitely, inflating tab heap
   // especially on high-cadence live tabs. Re-enable locally when debugging.

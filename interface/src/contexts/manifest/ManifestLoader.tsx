@@ -20,12 +20,17 @@ const applyManifest = (manifest: UiManifest): void => {
   configureFsEndpoints(fs?.endpoints);
 };
 
-// Loader keeps the rest of the tree mounted in the background — the
-// ManifestProgress overlay sits on top until the manifest has been
-// fetched AND its module list has finished its staggered reveal,
-// then unmounts. Children always have access to the (initially empty)
-// manifest context, so any module that subscribes survives an
-// inflight fetch without an extra null-check.
+// The manifest must be loaded BEFORE children mount. An earlier design
+// kept children mounted under the overlay so they could "warm up" in
+// the background, but that created a race: any DynamicFeature that
+// rendered with an empty manifest captured `entry=undefined`, kicked
+// its own fetch chain, and on the eventual context update the partial
+// state could leave inner FormLoaders stuck waiting on a tab REST that
+// fired against the wrong endpoint. Gating children on `loaded` (or
+// the error fallback after the overlay's hold) eliminates that window
+// entirely — by the time any DynamicFeature mounts, the manifest is
+// final and `findFeature(id)` always returns the real entry on first
+// render.
 const ManifestLoader: FC<RequiredChildrenProps> = (props) => {
   const [manifest, setManifest] = useState<UiManifest>(EMPTY_MANIFEST);
   const [loaded, setLoaded] = useState<boolean>(false);
@@ -64,7 +69,7 @@ const ManifestLoader: FC<RequiredChildrenProps> = (props) => {
 
   return (
     <ManifestContext.Provider value={value}>
-      {props.children}
+      {revealComplete && props.children}
       {!revealComplete && (
         <ManifestProgress
           loaded={loaded}
