@@ -127,23 +127,29 @@ const ManifestProgress: FC<ManifestProgressProps> = ({ loaded, manifest, error, 
                 {features.map((f, idx) => {
                   const ready = idx < revealed;
                   return (
-                    <Fade in={ready} key={f.id} timeout={180}>
-                      <ListItem disableGutters sx={{ py: 0.25 }}>
-                        <ListItemIcon sx={{ minWidth: 32 }}>
-                          {ready ? (
-                            <CheckCircleIcon color="success" fontSize="small" />
-                          ) : (
-                            <RadioButtonUncheckedIcon color="disabled" fontSize="small" />
-                          )}
-                        </ListItemIcon>
-                        <ListItemText
-                          primaryTypographyProps={{ variant: 'body2', noWrap: true }}
-                          secondaryTypographyProps={{ variant: 'caption', noWrap: true }}
-                          primary={f.menu?.label || f.title || f.id}
-                          secondary={f.id}
-                        />
-                      </ListItem>
-                    </Fade>
+                    <ListItem
+                      key={f.id}
+                      disableGutters
+                      sx={{
+                        py: 0.25,
+                        opacity: ready ? 1 : 0.5,
+                        transition: 'opacity 180ms ease',
+                      }}
+                    >
+                      <ListItemIcon sx={{ minWidth: 32 }}>
+                        {ready ? (
+                          <CheckCircleIcon color="success" fontSize="small" />
+                        ) : (
+                          <RadioButtonUncheckedIcon color="disabled" fontSize="small" />
+                        )}
+                      </ListItemIcon>
+                      <ListItemText
+                        primaryTypographyProps={{ variant: 'body2', noWrap: true }}
+                        secondaryTypographyProps={{ variant: 'caption', noWrap: true }}
+                        primary={f.menu?.label || f.title || f.id}
+                        secondary={f.id}
+                      />
+                    </ListItem>
                   );
                 })}
               </List>
