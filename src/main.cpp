@@ -11,6 +11,7 @@
 
 #include <ESPRack.h>
 #include <WiFiModule.h>
+#include <APModule.h>
 
 AsyncWebServer server(80);
 std::unique_ptr<ESPRack::App> app;
@@ -19,10 +20,11 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   Serial.println();
-  Serial.println(F("esp-rack-light-demo — Phase 1.0 boot"));
+  Serial.println(F("esp-rack-light-demo — Phase 1.1 boot"));
 
-  app = ESPRack::Builder(&server, "ESPRackDemo", "v0.1.0-pre")
+  app = ESPRack::Builder(&server, "ESPRackDemo", "v0.1.1-pre")
     .install<WiFiModule>()
+    .install<APModule>()
     .build();
 
   app->begin();
