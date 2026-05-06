@@ -252,7 +252,10 @@ LightStateService::LightStateService(ConfigManager* cfgMgr, WebManager* web)
   WebFeatureSpec spec;
   spec.id         = "lightState";
   spec.title      = "Light Service";
-  spec.component  = "LightControl";
+  // DynamicSettings = library's generic FormBuilder renderer. Everything
+  // about how this feature looks comes from FormBuilder calls inside
+  // read()/readSta() — there is no per-service React file.
+  spec.component  = "DynamicSettings";
   spec.menu.label = "Light";
   spec.menu.icon  = "Lightbulb";
   spec.menu.order = 50;

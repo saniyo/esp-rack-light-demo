@@ -35,6 +35,11 @@ def buildWeb():
     if pname:
         print(f"Injecting REACT_APP_PROJECT_NAME={pname}")
         os.environ["REACT_APP_PROJECT_NAME"] = pname
+
+    # Source maps are pure dev-time aid; in PROGMEM_WWW they get baked
+    # into firmware (~6 MB) for zero runtime benefit. CRA respects this
+    # env var at build time.
+    os.environ["GENERATE_SOURCEMAP"] = "false"
         
     try:
         env.Execute("npm install")

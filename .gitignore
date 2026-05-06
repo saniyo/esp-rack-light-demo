@@ -15,6 +15,12 @@ dist/
 .npm
 .cache/
 
+# interface/ is a build artefact — populated by scripts/sync_ui.py
+# from ../esp-rack/ui/ on each pio run. Never commit it from the demo;
+# the canonical source lives in the library. interface_overrides/ IS
+# tracked so consumer-specific tweaks (favicon, theme) survive sync.
+interface/
+
 # IDE
 .idea/
 *.iml
