@@ -1,17 +1,13 @@
-// esp-rack-light-demo — Phase 1.5 boot.
+// esp-rack-light-demo — Phase 1.7 boot.
 //
 // Composition root for the reference consumer of ESPRack. Installs
-// every module that's been ported so far. The Builder topologically
-// sorts by priority + dependencies; the call-order of .install<>()
-// is irrelevant to runtime ordering.
+// the framework modules + the demo's own LightControlModule. The
+// Builder topologically sorts by priority + dependencies; the call-
+// order of .install<>() is irrelevant to runtime ordering.
 //
-// Still pending:
-//   * SecurityModule          — login + JWT (FT_SECURITY=0 today)
-//   * LightControl module     — the actual application
-//   * AuthenticationService   — bundled with SecurityModule
-//
-// Once SecurityModule lands we'll flip FT_SECURITY=1 in features.ini
-// and the React frontend will reactivate the login screen.
+// All planned modules are now present. LightControlModule lives in
+// THIS repo (application code), not in ESPRack — flip FT_PROJECT=0
+// in features.ini to mute it without touching this file.
 
 #include <Arduino.h>
 #include <ESPAsyncWebServer.h>
@@ -37,6 +33,8 @@
 #include <AutoUpdateModule.h>
 #include <MqttModule.h>
 #include <TelegramModule.h>
+
+#include "LightControlModule.h"
 
 AsyncWebServer server(80);
 std::unique_ptr<ESPRack::App> app;
@@ -72,6 +70,8 @@ void setup() {
     .install<AutoUpdateModule>()
     .install<MqttModule>()
     .install<TelegramModule>()
+    // application
+    .install<LightControlModule>()
     // actions
     .install<RestartModule>()
     .install<FactoryResetModule>()
