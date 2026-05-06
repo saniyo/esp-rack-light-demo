@@ -18,23 +18,14 @@ def flagExists(flag):
         if (define == flag or (isinstance(define, list) and define[0] == flag)):
             return True
 
-def get_platform_name():
-    buildFlags = env.ParseFlags(env["BUILD_FLAGS"])
-    for define in buildFlags.get("CPPDEFINES"):
-        if isinstance(define, list) and define[0] == "PLATFORM_NAME":
-             # define[1] is typically quoted like '"Name"', strip quotes
-             return define[1].strip('"').strip("'")
-    return None
-
 def buildWeb():
     os.chdir("interface")
     print("Building interface with npm")
-    
-    # Inject PROJECT_NAME
-    pname = get_platform_name()
-    if pname:
-        print(f"Injecting REACT_APP_PROJECT_NAME={pname}")
-        os.environ["REACT_APP_PROJECT_NAME"] = pname
+
+    # No REACT_APP_PROJECT_NAME injection — the brand shown in the UI
+    # comes from /rest/uiManifest.device.name (set by Builder("...","..."))
+    # at runtime. Single source of truth in main.cpp; the React bundle
+    # stays consumer-agnostic.
 
     # Source maps are pure dev-time aid; in PROGMEM_WWW they get baked
     # into firmware (~6 MB) for zero runtime benefit. CRA respects this

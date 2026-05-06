@@ -252,6 +252,10 @@ LightStateService::LightStateService(ConfigManager* cfgMgr, WebManager* web)
   WebFeatureSpec spec;
   spec.id         = "lightState";
   spec.title      = "Light Service";
+  // Service-implementation version — distinct from the wrapping
+  // LightControlModule's wrapper version. Bump independently when the
+  // chart logic / table format / WS push shape evolves.
+  spec.version    = "0.1.0";
   // DynamicSettings = library's generic FormBuilder renderer. Everything
   // about how this feature looks comes from FormBuilder calls inside
   // read()/readSta() — there is no per-service React file.
