@@ -1,6 +1,7 @@
 #include "LightStateService.h"
 
 #include <math.h>
+#include <ITelegramProvider.h>
 
 // ===== FS config (persisted editable fields only — chart stream is volatile) =====
 void LightState::readFs(LightState& s, JsonObject& root) {
@@ -236,7 +237,9 @@ StateUpdateResult LightState::update(JsonObject& root, LightState& s) {
 }
 
 // ===== Service =====
-LightStateService::LightStateService(ConfigManager* cfgMgr, WebManager* web)
+LightStateService::LightStateService(ConfigManager* cfgMgr,
+                                     WebManager* web,
+                                     ITelegramProvider* telegram)
     : StatefulService<LightState>(),
       _cfg(cfgMgr,
            "lightState",
@@ -246,7 +249,8 @@ LightStateService::LightStateService(ConfigManager* cfgMgr, WebManager* web)
            LightState::readFs,
            LightState::updFs,
            false /*autoSave*/),
-      _web(web) {
+      _web(web),
+      _telegram(telegram) {
   if (!web) return;
 
   WebFeatureSpec spec;
@@ -367,6 +371,20 @@ void LightStateService::loop() {
 
     return StateUpdateResult::CHANGED;
   }, "tick");
+
+  // Telegram demo — once a minute, push the latest sin/cos sample to
+  // show the subscription provider working end-to-end. No-op when
+  // TelegramModule wasn't installed (telegram pointer null) or when
+  // the bot isn't configured (subscription returns InvalidSendId for
+  // dropped, queue logs the reason).
+  if (_telegramSub.valid() && (now - _telegramLastSendMs) >= 60000) {
+    _telegramLastSendMs = now;
+    char buf[96];
+    snprintf(buf, sizeof(buf),
+             "sin = %.3f, cos = %.3f (uptime %lus)",
+             s, c, (unsigned long)(now / 1000));
+    _telegramSub.send(String(buf));
+  }
 }
 
 void LightStateService::begin() {
@@ -376,6 +394,18 @@ void LightStateService::begin() {
     Serial.printf("[LightState] changed origin=%s t_number=%.2f t_slider=%.0f t_switch=%d\n",
                   origin.c_str(), s.t_number, s.t_slider, (int)s.t_switch);
   });
+
+  // Subscribe to Telegram with our service tag + a conservative
+  // 1-msg/min cap so the chat never gets flooded by the chart.
+  // defaultTopicId left empty — we ride the bot's global default.
+  // Operator can rebuild firmware with a specific topic if they
+  // want sin/cos samples in a dedicated thread.
+  if (_telegram) {
+    TelegramSubscriptionConfig cfg;
+    cfg.tagPrefix             = "[Light] ";
+    cfg.maxMessagesPerMinute  = 2;          // ourselves + headroom
+    _telegramSub = _telegram->subscribe("lightControl", cfg);
+  }
 
   if (_feature) _feature->broadcastWs("boot");
 }

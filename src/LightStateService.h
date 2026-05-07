@@ -32,6 +32,9 @@
 #include <ConfigDelegate.h>
 #include <WebFeatureDelegate.h>
 #include <WebManager.h>
+#include <TelegramSubscription.h>
+
+class ITelegramProvider;
 
 #define LIGHT_SETTINGS_PATH        "/rest/lightState"
 #define LIGHT_SETTINGS_SOCKET_PATH "/ws/lightState"
@@ -88,7 +91,13 @@ class LightState {
 
 class LightStateService : public StatefulService<LightState> {
  public:
-  LightStateService(ConfigManager* cfgMgr, WebManager* web);
+  // `telegram` is optional — when supplied (TelegramModule was
+  // installed in the Builder chain) LightStateService will subscribe
+  // and stream a sin/cos sample once a minute as a live demo of the
+  // subscription provider model.
+  LightStateService(ConfigManager* cfgMgr,
+                    WebManager* web,
+                    ITelegramProvider* telegram = nullptr);
 
   void begin();
   void loop();
@@ -99,6 +108,9 @@ class LightStateService : public StatefulService<LightState> {
   ConfigDelegate<LightState>      _cfg;
   WebFeatureEntry<LightState>*    _feature{nullptr};
   WebManager*                     _web{nullptr};
+  ITelegramProvider*              _telegram{nullptr};
+  TelegramSubscription            _telegramSub;
+  unsigned long                   _telegramLastSendMs{0};
   double                          _phase{0.0};
   unsigned long                   _lastTick{0};
   String                          _version;
