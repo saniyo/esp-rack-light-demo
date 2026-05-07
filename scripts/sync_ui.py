@@ -30,9 +30,26 @@ import sys
 Import("env")  # noqa: F821  (PlatformIO injects)
 
 ROOT          = Path.cwd()
-LIBRARY_UI    = ROOT.parent / "esp-rack" / "ui"
 INTERFACE_DIR = ROOT / "interface"
 OVERRIDES_DIR = ROOT / "interface_overrides"
+
+# Resolve where the canonical UI lives. Two supported modes:
+#   1. Local-dev — sibling clone: ../esp-rack/ui/
+#      (lib_extra_dirs in platformio.ini points at ../esp-rack/lib +
+#      ../esp-rack/modules; we mirror that convention for UI)
+#   2. Git-pull — released library cloned by PIO into
+#      .pio/libdeps/<env>/ESPRack/ui/ via lib_deps = github URL
+# Local sibling wins when present so active framework dev iterates
+# without re-tagging releases. PIO-cloned location is the fallback,
+# resolved per build env via env["PIOENV"].
+def _resolve_library_ui() -> Path:
+    sibling = ROOT.parent / "esp-rack" / "ui"
+    if sibling.is_dir():
+        return sibling
+    pio_env = env["PIOENV"]  # noqa: F821
+    return ROOT / ".pio" / "libdeps" / pio_env / "ESPRack" / "ui"
+
+LIBRARY_UI = _resolve_library_ui()
 
 # Files at the top level of ../esp-rack/ui/ — flat copy. Anything not
 # listed here is ignored (e.g. node_modules / build live elsewhere).
