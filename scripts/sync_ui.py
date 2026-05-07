@@ -42,14 +42,46 @@ OVERRIDES_DIR = ROOT / "interface_overrides"
 # Local sibling wins when present so active framework dev iterates
 # without re-tagging releases. PIO-cloned location is the fallback,
 # resolved per build env via env["PIOENV"].
-def _resolve_library_ui() -> Path:
-    sibling = ROOT.parent / "esp-rack" / "ui"
-    if sibling.is_dir():
-        return sibling
-    pio_env = env["PIOENV"]  # noqa: F821
-    return ROOT / ".pio" / "libdeps" / pio_env / "ESPRack" / "ui"
+def _resolve_library_root() -> Path:
+    """Return the root of esp-rack (the dir containing lib/, modules/, ui/)
+    in whichever mode is active.
 
-LIBRARY_UI = _resolve_library_ui()
+    Priority: PIO-cloned location (`.pio/libdeps/<env>/ESPRack/`) first,
+    sibling clone (`../esp-rack/`) second. Reasoning: when lib_deps in
+    platformio.ini lists the GitHub URL, PIO populates the .pio path
+    AND that's where it'll compile from. WWWData.h must end up in that
+    same tree or App.cpp's `#include <WWWData.h>` won't resolve. If
+    only the sibling exists (pure local-dev mode, no released-mode
+    lib_deps), .pio path is empty and we fall through.
+
+    Mixed state (both present) is normal during dev — the operator
+    might have left the sibling around while testing the released
+    flow. Cloned takes precedence so the build is consistent with
+    what PIO is actually compiling.
+    """
+    pio_env = env["PIOENV"]  # noqa: F821
+    cloned = ROOT / ".pio" / "libdeps" / pio_env / "ESPRack"
+    if (cloned / "ui").is_dir():
+        return cloned
+    sibling = ROOT.parent / "esp-rack"
+    if (sibling / "ui").is_dir():
+        return sibling
+    # Neither found — return cloned path so the downstream "missing UI"
+    # error message points at the location PIO is expected to populate.
+    return cloned
+
+LIBRARY_ROOT = _resolve_library_root()
+LIBRARY_UI   = LIBRARY_ROOT / "ui"
+
+# Webpack's progmem-generator must write WWWData.h into the library's
+# include dir so App.cpp's `#include <WWWData.h>` resolves at C++
+# compile time. The path differs by mode (sibling vs PIO-cloned), so
+# we resolve here and propagate via env var; config-overrides.js
+# reads ESPRACK_INCLUDE_DIR and builds the outputPath accordingly.
+# os.environ persists into env.Execute("npm run build") in the
+# follow-up build_interface.py via standard subprocess env inheritance.
+LIBRARY_INCLUDE_DIR = (LIBRARY_ROOT / "lib" / "ESPRack" / "include").resolve()
+os.environ["ESPRACK_INCLUDE_DIR"] = str(LIBRARY_INCLUDE_DIR)
 
 # Files at the top level of ../esp-rack/ui/ — flat copy. Anything not
 # listed here is ignored (e.g. node_modules / build live elsewhere).
