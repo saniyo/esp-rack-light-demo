@@ -42,34 +42,72 @@ OVERRIDES_DIR = ROOT / "interface_overrides"
 # Local sibling wins when present so active framework dev iterates
 # without re-tagging releases. PIO-cloned location is the fallback,
 # resolved per build env via env["PIOENV"].
+def _is_local_dev_mode() -> bool:
+    """Detect which library-consumption mode platformio.ini is in.
+    Returns True if `lib_extra_dirs` references a sibling `esp-rack`
+    path (local-dev mode); False if released-mode (lib_deps github
+    URL only). Mirrors what PIO LDF will actually do — keeps sync_ui
+    aligned with where PIO compiles from instead of resolving against
+    leftover dirs from a previous mode.
+    """
+    raw = env.GetProjectOption("lib_extra_dirs", "")  # noqa: F821
+    if isinstance(raw, (list, tuple)):
+        joined = "\n".join(str(p) for p in raw)
+    else:
+        joined = str(raw or "")
+    return "esp-rack" in joined
+
+
 def _resolve_library_root() -> Path:
-    """Return the root of esp-rack (the dir containing lib/, modules/, ui/)
-    in whichever mode is active.
+    """Return the root of esp-rack (the dir containing lib/, modules/,
+    ui/) for the active mode.
 
-    Priority: PIO-cloned location (`.pio/libdeps/<env>/ESPRack/`) first,
-    sibling clone (`../esp-rack/`) second. Reasoning: when lib_deps in
-    platformio.ini lists the GitHub URL, PIO populates the .pio path
-    AND that's where it'll compile from. WWWData.h must end up in that
-    same tree or App.cpp's `#include <WWWData.h>` won't resolve. If
-    only the sibling exists (pure local-dev mode, no released-mode
-    lib_deps), .pio path is empty and we fall through.
+    Local-dev mode: sibling `../esp-rack/` (matches lib_extra_dirs).
+    Released mode:  PIO-cloned `.pio/libdeps/<env>/ESPRack/`.
 
-    Mixed state (both present) is normal during dev — the operator
-    might have left the sibling around while testing the released
-    flow. Cloned takes precedence so the build is consistent with
-    what PIO is actually compiling.
+    The detection reads `lib_extra_dirs` from platformio.ini so a
+    mode switch (uncomment one block, comment the other) takes effect
+    without manual cache-cleaning. A leftover `.pio/libdeps/.../ESPRack`
+    from a previous released-mode build is correctly ignored when the
+    consumer flips back to local-dev.
     """
     pio_env = env["PIOENV"]  # noqa: F821
-    cloned = ROOT / ".pio" / "libdeps" / pio_env / "ESPRack"
+    sibling = ROOT.parent / "esp-rack"
+    cloned  = ROOT / ".pio" / "libdeps" / pio_env / "ESPRack"
+
+    if _is_local_dev_mode():
+        if (sibling / "ui").is_dir():
+            return sibling
+        # Local-dev configured but sibling missing — fail loud, the
+        # downstream error will name the missing location.
+        return sibling
+
+    # Released-mode (or implicit when lib_extra_dirs absent).
     if (cloned / "ui").is_dir():
         return cloned
-    sibling = ROOT.parent / "esp-rack"
-    if (sibling / "ui").is_dir():
-        return sibling
-    # Neither found — return cloned path so the downstream "missing UI"
-    # error message points at the location PIO is expected to populate.
+    # Neither found — return cloned path so the "missing UI" message
+    # points at where PIO is expected to have populated.
     return cloned
 
+def _purge_stale_cloned_lib() -> None:
+    """When the demo is in local-dev mode, a leftover `.pio/libdeps/<env>/
+    ESPRack/` from a previous released-mode build creates two libraries
+    named "ESPRack" in PIO's LDF view (sibling + cloned), each with its
+    own library.json. PIO's compat=strict resolution then becomes
+    non-deterministic: usually picks one, sometimes warns, occasionally
+    links against the wrong one. Pre-emptively clean the cloned copy
+    so local-dev builds always resolve against the sibling.
+    """
+    if not _is_local_dev_mode():
+        return
+    pio_env = env["PIOENV"]  # noqa: F821
+    stale = ROOT / ".pio" / "libdeps" / pio_env / "ESPRack"
+    if stale.exists():
+        rmtree(stale)
+        print(f"[sync_ui] removed stale cloned lib at {stale}")
+
+
+_purge_stale_cloned_lib()
 LIBRARY_ROOT = _resolve_library_root()
 LIBRARY_UI   = LIBRARY_ROOT / "ui"
 
