@@ -402,7 +402,10 @@ void LightStateService::begin() {
   // want sin/cos samples in a dedicated thread.
   if (_telegram) {
     TelegramSubscriptionConfig cfg;
-    cfg.tagPrefix             = "[Light] ";
+    // Markdown-safe prefix — square brackets would trigger Telegram's
+    // link-syntax `[text](url)` parser in parseMode=Markdown and the
+    // whole message would silently fail to render.
+    cfg.tagPrefix             = "Light: ";
     cfg.maxMessagesPerMinute  = 2;          // ourselves + headroom
     _telegramSub = _telegram->subscribe("lightControl", cfg);
   }
