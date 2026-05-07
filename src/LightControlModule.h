@@ -20,6 +20,8 @@
 #include <Module.h>
 #include <App.h>
 #include <Features.h>
+#include <ITelegramProvider.h>
+#include <IMqttProvider.h>
 #include "LightStateService.h"
 #include <memory>
 
@@ -33,13 +35,15 @@ class LightControlModule : public ESPRack::Module {
 
   void onInstall(ESPRack::ModuleContext& ctx) override {
 #if FT_ENABLED(FT_PROJECT)
-    // Pull the telegram provider via App — TelegramModule late-binds it
-    // during its own onInstall (priority 40), and Builder topo-sorts so
-    // priority 60 modules see the populated pointer here. Null-safe:
-    // if TelegramModule isn't installed at all, LightStateService just
-    // doesn't subscribe.
+    // Pull the optional providers via App — Telegram + MQTT modules
+    // late-bind during their own onInstall (priority 40), and
+    // Builder topo-sorts so priority 60 modules see the populated
+    // pointers here. Null-safe: if either module isn't installed
+    // at all, LightStateService just skips subscribing on that
+    // transport.
     ITelegramProvider* tg = ctx.app ? ctx.app->telegram() : nullptr;
-    svc_.reset(new LightStateService(ctx.cfgMgr, ctx.web, tg));
+    IMqttProvider*     mq = ctx.app ? ctx.app->mqtt()     : nullptr;
+    svc_.reset(new LightStateService(ctx.cfgMgr, ctx.web, tg, mq));
     if (ctx.deviceVersion) svc_->setVersion(ctx.deviceVersion);
 #else
     (void)ctx;

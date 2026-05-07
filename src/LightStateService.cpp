@@ -2,6 +2,56 @@
 
 #include <math.h>
 #include <ITelegramProvider.h>
+#include <IMqttProvider.h>
+
+// ===== MQTT inbox upsert (called from LightStateService onMessage handler) =====
+// Mirrors the topic→last-value map into the `mqtt_inbox` state vector
+// (UI surface) and queues the topic for streaming WS push. We update
+// state via update() so addUpdateHandler fires + WS broadcast
+// schedules naturally — same path the chart tick uses.
+void LightStateService::upsertInbox(const String& topic, const String& payload) {
+  String t = topic;
+  String p = payload;
+  if (p.length() > 64) { p.remove(64); p += "..."; }
+
+  update([t, p](LightState& s) {
+    bool changed = false;
+    bool found   = false;
+    for (auto& e : s.mqtt_inbox) {
+      if (e.topic == t) {
+        if (e.value != p) e.value = p;
+        e.count++;
+        e.lastSeenAt_s = (uint32_t)(millis() / 1000);
+        found = true;
+        changed = true;
+        break;
+      }
+    }
+    if (!found) {
+      if (s.mqtt_inbox.size() >= 32) {
+        const String evicted = s.mqtt_inbox.front().topic;
+        s.mqtt_inbox.erase(s.mqtt_inbox.begin());
+        for (auto it = s.mqtt_pending.begin(); it != s.mqtt_pending.end(); ) {
+          if (*it == evicted) it = s.mqtt_pending.erase(it); else ++it;
+        }
+      }
+      LightState::MqttInboxEntry n;
+      n.topic        = t;
+      n.value        = p;
+      n.count        = 1;
+      n.lastSeenAt_s = (uint32_t)(millis() / 1000);
+      s.mqtt_inbox.push_back(std::move(n));
+      changed = true;
+    }
+    bool pending = false;
+    for (const auto& q : s.mqtt_pending) if (q == t) { pending = true; break; }
+    if (!pending) {
+      if (s.mqtt_pending.size() >= 16) s.mqtt_pending.erase(s.mqtt_pending.begin());
+      s.mqtt_pending.push_back(t);
+    }
+    return changed ? StateUpdateResult::CHANGED : StateUpdateResult::UNCHANGED;
+  }, "mqtt");
+}
 
 // ===== FS config (persisted editable fields only — chart stream is volatile) =====
 void LightState::readFs(LightState& s, JsonObject& root) {
@@ -99,6 +149,40 @@ void LightState::readSta(LightState& s, JsonObject& root) {
     row["timestamp"] = r.ts;
     row["chart_sin"] = r.sin_v;
     row["chart_cos"] = r.cos_v;
+  }
+
+  // MQTT inbox — streaming push, one or many rows per tick depending
+  // on burst rate. tableMode("upsert") on frontend dedups by topic.
+  // Same pattern MqttSettingsService uses for its sniffer table —
+  // proves the consumer pattern works end-to-end inside an
+  // application service, not just the framework module.
+  if (!s.mqtt_pending.empty()) {
+    JsonArray mq = root.createNestedArray("mqtt_inbox");
+    for (const auto& t : s.mqtt_pending) {
+      for (const auto& e : s.mqtt_inbox) {
+        if (e.topic != t) continue;
+        JsonObject row = mq.createNestedObject();
+        row["topic"]      = e.topic;
+        row["value"]      = e.value;
+        row["count"]      = e.count;
+        row["lastSeenAt"] = e.lastSeenAt_s;
+        break;
+      }
+    }
+    s.mqtt_pending.clear();
+  }
+
+  // Attached-values mirror — full replace each tick. List is small
+  // (≤16 rows by MqttSettings::MQTT_ATTACHED_TOPICS_MAX) so we can
+  // afford a complete dump without blowing the WS frame, and it
+  // saves us the per-row "did this change since last tick" logic
+  // that streaming/upsert would need. Empty list emits an empty
+  // array — frontend's replace-mode TableField clears accordingly.
+  JsonArray av = root.createNestedArray("attached_values");
+  for (const auto& e : s.attached_view) {
+    JsonObject row = av.createNestedObject();
+    row["topic"] = e.topic;
+    row["value"] = e.value;
   }
 }
 
@@ -230,6 +314,76 @@ void LightState::read(LightState& s, JsonObject& root) {
       col("chart_cos", "cos",   "number", format("0.000")),
       tableMode("append"), maxRows(50),
       icon("TableChart"));
+
+  // ── INTEGRATIONS — proof the consumer side of the messaging
+  // providers wires through into application code ──
+  JsonArray integ = FormBuilder::createForm(
+      root, "integrations", "Messaging integrations consumed by Light");
+
+  FormBuilder::addMessageField(integ, "m_integrations",
+      "These cards show how LightStateService consumes Telegram + MQTT "
+      "via their subscription handles. Telegram block: outbound stats "
+      "(messages we sent during the demo). MQTT inbox: live key-value "
+      "table of every topic this service is hearing — populated by "
+      "the onMessage('#') handler stuffing values into a std::map. "
+      "Operator-attached topics from the MQTT tab flow in here too.",
+      level("info"), icon("Cable"));
+
+  // Telegram subscription stats — readback of what the bot module
+  // exposed via TelegramSubscription::stats() at last form fetch.
+  // Static snapshot per REST GET; refresh by reopening the tab.
+  FormBuilder::addTextField(integ, "tg_service", AF::R, "lightControl",
+                            label("Telegram service tag"), icon("Telegram"));
+
+  // MQTT inbox table — reflects _values map mirrored into mqtt_inbox.
+  // tableMode("upsert") with first-column key (`topic`) merges rows
+  // delivered one-or-more-per-WS-tick from readSta. Cap 32 in heap +
+  // maxRows(32) in frontend keeps memory bounded. We seed the
+  // current snapshot on form GET so a tab-refresh shows accumulated
+  // values instead of an empty grid awaiting the next WS push.
+  JsonObject inbox = FormBuilder::addTableField(integ, "mqtt_inbox", AF::R,
+      col("topic",      "Topic",     "text"),
+      col("value",      "Value",     "text"),
+      col("count",      "Count",     "number", format("0")),
+      col("lastSeenAt", "Last (s)",  "number", format("0")),
+      tableMode("upsert"), maxRows(32),
+      icon("Inbox"),
+      label("MQTT inbox (consumed via onMessage('#'))"));
+  JsonArray inboxRows = inbox["mqtt_inbox"].as<JsonArray>();
+  for (const auto& e : s.mqtt_inbox) {
+    JsonObject row = inboxRows.createNestedObject();
+    row["topic"]      = e.topic;
+    row["value"]      = e.value;
+    row["count"]      = e.count;
+    row["lastSeenAt"] = e.lastSeenAt_s;
+  }
+  // Attached values table — JOIN of two consumer-pattern halves:
+  //   left  = `_mqtt->attachedTopics()` — operator-curated selection
+  //           from MQTT tab (persists across reboot)
+  //   right = `_values` map populated by THIS service's onMessage('#')
+  // For each operator-pinned topic we show the last payload Light
+  // saw on the wire. Empty value = topic attached but no message
+  // received yet (broker has nothing retained, or the publisher
+  // hasn't sent since boot). Read-only seed — the table updates on
+  // every REST GET / refetchForm; live tick is the broader
+  // mqtt_inbox above so we don't fight upsert semantics here.
+  JsonObject attVal = FormBuilder::addTableField(integ, "attached_values", AF::R,
+      col("topic",  "Attached topic", "text"),
+      col("value",  "Last value",     "text"),
+      tableMode("replace"), maxRows(16),
+      icon("PushPin"),
+      label("Operator-attached topics + last value"));
+  // Pull the topic list from `s.attached_view` — mirrored into state
+  // by loop() once a tick (see the join logic there). buildForm is
+  // static (ConfigDelegate's secret-key probe runs it on a default-
+  // constructed state too), so we can't reach `_mqtt` / `_values`
+  // here directly. Mirror-into-state keeps the static contract.
+  JsonArray attRows = attVal["attached_values"].as<JsonArray>();
+  for (const auto& e : s.attached_view) {
+    JsonObject row = attRows.createNestedObject();
+    row["topic"] = e.topic;
+    row["value"] = e.value;
+  }
 }
 
 StateUpdateResult LightState::update(JsonObject& root, LightState& s) {
@@ -239,7 +393,8 @@ StateUpdateResult LightState::update(JsonObject& root, LightState& s) {
 // ===== Service =====
 LightStateService::LightStateService(ConfigManager* cfgMgr,
                                      WebManager* web,
-                                     ITelegramProvider* telegram)
+                                     ITelegramProvider* telegram,
+                                     IMqttProvider* mqtt)
     : StatefulService<LightState>(),
       _cfg(cfgMgr,
            "lightState",
@@ -250,7 +405,8 @@ LightStateService::LightStateService(ConfigManager* cfgMgr,
            LightState::updFs,
            false /*autoSave*/),
       _web(web),
-      _telegram(telegram) {
+      _telegram(telegram),
+      _mqtt(mqtt) {
   if (!web) return;
 
   WebFeatureSpec spec;
@@ -280,6 +436,19 @@ LightStateService::LightStateService(ConfigManager* cfgMgr,
   statusTab.postable = false;
   statusTab.live     = true;
   spec.tabs.push_back(statusTab);
+
+  // Integrations tab — surfaces what other framework providers
+  // (Telegram, MQTT) the service is consuming. read() emits the
+  // matching `integrations` sub-form key. Live too — the MQTT
+  // inbox + attached-values tables tick on each loop tick.
+  WebTabSpec integrationsTab;
+  integrationsTab.key      = "integrations";
+  integrationsTab.title    = "Integrations";
+  integrationsTab.restPath = LIGHT_SETTINGS_PATH;
+  integrationsTab.postable = false;
+  integrationsTab.live     = true;
+  integrationsTab.order    = 15;
+  spec.tabs.push_back(integrationsTab);
 
   WebTabSpec settingsTab;
   settingsTab.key      = "settings";
@@ -373,17 +542,72 @@ void LightStateService::loop() {
   }, "tick");
 
   // Telegram demo — once a minute, push the latest sin/cos sample to
-  // show the subscription provider working end-to-end. No-op when
-  // TelegramModule wasn't installed (telegram pointer null) or when
-  // the bot isn't configured (subscription returns InvalidSendId for
-  // dropped, queue logs the reason).
-  if (_telegramSub.valid() && (now - _telegramLastSendMs) >= 60000) {
+  // show the subscription provider working end-to-end. .active()
+  // gates on (handle valid) AND (mute flag on) AND (bot not
+  // Disabled) — keeps the recent-activity log free of spam "skip:
+  // bot disabled" lines when the operator's left the bot toggled
+  // off, which on a 1-tick-per-minute cadence would otherwise
+  // accumulate fast.
+  if (_telegramSub.active() && (now - _telegramLastSendMs) >= 60000) {
     _telegramLastSendMs = now;
     char buf[96];
     snprintf(buf, sizeof(buf),
              "sin = %.3f, cos = %.3f (uptime %lus)",
              s, c, (unsigned long)(now / 1000));
     _telegramSub.send(String(buf));
+  }
+
+  // MQTT demo — same cadence, two separate retained topics so an
+  // operator running `mosquitto_sub -h <host> -t 'demo/light/#' -v`
+  // sees both legs cleanly. .active() gates on (handle valid AND
+  // enabled AND broker not Disabled) so the publishDropped counter
+  // doesn't tick when MQTT is intentionally off.
+  if (_mqttSub.active() && (now - _mqttLastPubMs) >= 60000) {
+    _mqttLastPubMs = now;
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%.4f", s);
+    _mqttSub.publish("sin", buf);
+    snprintf(buf, sizeof(buf), "%.4f", c);
+    _mqttSub.publish("cos", buf);
+  }
+
+  // Refresh the attached-view snapshot. Joins the operator's MQTT
+  // attached_topics list (provider-owned) with our local _values map
+  // (filled by the sniffer onMessage handler). Done in loop() so the
+  // form reader reads a consistent vector without crossing into
+  // service fields from the static buildForm path. Cheap — at most
+  // 16 string copies per tick, only when something changed.
+  if (_mqtt) {
+    const auto& wanted = _mqtt->attachedTopics();
+    bool needsRebuild = wanted.size() != _state.attached_view.size();
+    if (!needsRebuild) {
+      for (size_t i = 0; i < wanted.size(); ++i) {
+        if (wanted[i] != _state.attached_view[i].topic) { needsRebuild = true; break; }
+      }
+    }
+    // Also rebuild if any value changed for an existing topic — picks
+    // up new payloads received between ticks without a topic-list shift.
+    if (!needsRebuild) {
+      for (auto& v : _state.attached_view) {
+        auto it = _values.find(v.topic);
+        const String& latest = it != _values.end() ? it->second : String();
+        if (v.value != latest) { needsRebuild = true; break; }
+      }
+    }
+    if (needsRebuild) {
+      update([this, &wanted](LightState& st) {
+        st.attached_view.clear();
+        st.attached_view.reserve(wanted.size());
+        for (const auto& t : wanted) {
+          LightState::AttachedViewEntry e;
+          e.topic = t;
+          auto it = _values.find(t);
+          e.value = it != _values.end() ? it->second : String();
+          st.attached_view.push_back(std::move(e));
+        }
+        return StateUpdateResult::CHANGED;
+      }, "attached");
+    }
   }
 }
 
@@ -408,6 +632,45 @@ void LightStateService::begin() {
     cfg.tagPrefix             = "Light: ";
     cfg.maxMessagesPerMinute  = 2;          // ourselves + headroom
     _telegramSub = _telegram->subscribe("lightControl", cfg);
+  }
+
+  // MQTT subscription — prefix routes our publishes under demo/light/.
+  // Default QoS-0 retained so a fresh subscriber gets the latest
+  // sample immediately; rate cap of 4 covers our 2 publishes/min plus
+  // a little headroom for any future per-tick beacons.
+  if (_mqtt) {
+    MqttSubscriptionConfig cfg;
+    cfg.defaultTopicPrefix     = "demo/light/";
+    cfg.defaultQos             = 0;
+    cfg.defaultRetain          = true;
+    cfg.maxPublishesPerMinute  = 4;
+    _mqttSub = _mqtt->subscribe("lightControl", cfg);
+
+    // Echo command channel — round-trip test that the inbound
+    // dispatch path works. Published payload arrives back as a
+    // Telegram message if Telegram is up, otherwise just to Serial.
+    _mqttSub.onMessage("cmd/echo", [this](const String& topic, const String& payload) {
+      Serial.printf("[Light] MQTT echo on %s: %s\n", topic.c_str(), payload.c_str());
+      if (_telegramSub.active()) {
+        _telegramSub.send(String("echo: ") + payload);
+      }
+    });
+
+    // Sniffer-equivalent: separate subscription with empty prefix so
+    // we hear EVERY topic the broker delivers (including ones the
+    // operator attached via the MQTT tab's UI). Each message gets
+    // upserted into _values + the mqtt_inbox state mirror, which
+    // surfaces in the Status tab "MQTT inbox" table. Demonstrates
+    // the consumer pattern from earlier — handler stores in heap,
+    // valueOf() reads anywhere.
+    MqttSubscriptionConfig snifferCfg;
+    snifferCfg.defaultTopicPrefix    = "";
+    snifferCfg.maxPublishesPerMinute = 0;  // outbound unused on sniffer
+    _mqttSniffer = _mqtt->subscribe("lightSniffer", snifferCfg);
+    _mqttSniffer.onMessage("#", [this](const String& topic, const String& payload) {
+      _values[topic] = payload;
+      upsertInbox(topic, payload);
+    });
   }
 
   if (_feature) _feature->broadcastWs("boot");

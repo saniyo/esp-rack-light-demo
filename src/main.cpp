@@ -10,6 +10,7 @@
 // in features.ini to mute it without touching this file.
 
 #include <Arduino.h>
+#include <esp_log.h>
 #include <ESPAsyncWebServer.h>
 
 #include <ESPRack.h>
@@ -44,6 +45,15 @@ void setup() {
   delay(200);
   Serial.println();
   Serial.println(F("esp-rack-light-demo — Phase 1.5 boot"));
+
+  // The PING / PINGRESP / _onData spam from AsyncMqttClient is
+  // gated by Arduino-ESP32's compile-time log_i() macro, controlled
+  // by CORE_DEBUG_LEVEL in platformio.ini (set to 2 = WARN to
+  // silence). This runtime call covers code paths that use the
+  // ESP_LOGx family (which IS runtime-tunable per tag), so it's
+  // kept as a safety net for any lib that later switches to
+  // ESP_LOGI under the same tag.
+  esp_log_level_set("AsyncMqttClient", ESP_LOG_WARN);
 
   app = ESPRack::Builder(&server, "ESPRackDemo", "v0.1.6-pre")
     // foundation: feature flags, UI manifest, presence registry

@@ -33,8 +33,11 @@
 #include <WebFeatureDelegate.h>
 #include <WebManager.h>
 #include <TelegramSubscription.h>
+#include <MqttSubscription.h>
+#include <map>
 
 class ITelegramProvider;
+class IMqttProvider;
 
 #define LIGHT_SETTINGS_PATH        "/rest/lightState"
 #define LIGHT_SETTINGS_SOCKET_PATH "/ws/lightState"
@@ -69,6 +72,36 @@ class LightState {
 
   uint32_t uptime_ms {0};
 
+  // MQTT received values — populated by LightStateService's onMessage
+  // handler (subscribes to "#" with empty prefix). Keyed by topic,
+  // value is the most recent payload. Demonstrates the consumer
+  // pattern: handler stores into C++ heap, anywhere in the service
+  // can read via valueOf("topic"). Surfaced in the Status tab as a
+  // "MQTT inbox" table so the operator sees attached topics + their
+  // last values without leaving the Light page.
+  struct MqttInboxEntry {
+    String   topic;
+    String   value;
+    uint32_t count{0};
+    uint32_t lastSeenAt_s{0};
+  };
+  std::vector<MqttInboxEntry> mqtt_inbox;
+  // Index of the entry mutated since last WS tick (for streaming WS
+  // push, same upsert-by-topic pattern as MqttSettingsService).
+  std::vector<String> mqtt_pending;
+
+  // Snapshot of operator-attached topics (from IMqttProvider::
+  // attachedTopics()) joined with the last-seen value from the
+  // service's _values map. Refreshed once per loop() tick so the
+  // form reader sees a consistent view without having to reach into
+  // a non-static service field. Bounded by MQTT_ATTACHED_TOPICS_MAX
+  // on the provider side; we just mirror.
+  struct AttachedViewEntry {
+    String topic;
+    String value;
+  };
+  std::vector<AttachedViewEntry> attached_view;
+
   // Rolling table feeding the TABLE widget via WS append-mode.
   struct TableRow {
     uint32_t idx;
@@ -91,26 +124,50 @@ class LightState {
 
 class LightStateService : public StatefulService<LightState> {
  public:
-  // `telegram` is optional — when supplied (TelegramModule was
-  // installed in the Builder chain) LightStateService will subscribe
-  // and stream a sin/cos sample once a minute as a live demo of the
-  // subscription provider model.
+  // `telegram` and `mqtt` are optional — when supplied (the
+  // respective module was installed in the Builder chain)
+  // LightStateService subscribes and streams a sin/cos sample once
+  // a minute as a live end-to-end demo of the subscription provider
+  // model. Same cadence on both transports — operators can toggle
+  // each side independently to compare delivery.
   LightStateService(ConfigManager* cfgMgr,
                     WebManager* web,
-                    ITelegramProvider* telegram = nullptr);
+                    ITelegramProvider* telegram = nullptr,
+                    IMqttProvider* mqtt = nullptr);
 
   void begin();
   void loop();
 
   void setVersion(const char* v) { _version = v ? String(v) : String(); }
 
+  // Demonstrates the consumer pattern from the IMqttProvider model:
+  // any other code in the service can read the last-seen payload for
+  // a given topic without polling the provider. Returns "" when the
+  // topic was never received.
+  String valueOf(const String& topic) const {
+    auto it = _values.find(topic);
+    return it != _values.end() ? it->second : String();
+  }
+
  private:
+  // Live key-value store fed by MQTT onMessage. Backs valueOf() and
+  // the mqtt_inbox UI table. Bounded by upsertInbox to MAX_INBOX
+  // entries — operator's attached topics flow in here, but a stray
+  // wildcard handler on a busy broker shouldn't unbounded-grow heap.
+  static constexpr size_t MAX_INBOX = 32;
+  std::map<String, String> _values;
+  void upsertInbox(const String& topic, const String& payload);
+
   ConfigDelegate<LightState>      _cfg;
   WebFeatureEntry<LightState>*    _feature{nullptr};
   WebManager*                     _web{nullptr};
   ITelegramProvider*              _telegram{nullptr};
   TelegramSubscription            _telegramSub;
   unsigned long                   _telegramLastSendMs{0};
+  IMqttProvider*                  _mqtt{nullptr};
+  MqttSubscription                _mqttSub;
+  MqttSubscription                _mqttSniffer;   // separate handle for "#" listening
+  unsigned long                   _mqttLastPubMs{0};
   double                          _phase{0.0};
   unsigned long                   _lastTick{0};
   String                          _version;
