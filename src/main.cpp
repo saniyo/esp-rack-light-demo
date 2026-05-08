@@ -34,6 +34,7 @@
 #include <AutoUpdateModule.h>
 #include <MqttModule.h>
 #include <TelegramModule.h>
+#include <CertManagerModule.h>
 
 #include "LightControlModule.h"
 
@@ -80,6 +81,7 @@ void setup() {
     .install<AutoUpdateModule>()
     .install<MqttModule>()
     .install<TelegramModule>()
+    .install<CertManagerModule>()
     // application
     .install<LightControlModule>()
     // actions
