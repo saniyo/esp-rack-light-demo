@@ -34,6 +34,8 @@
 #include <AutoUpdateModule.h>
 #include <MqttModule.h>
 #include <TelegramModule.h>
+#include <CertManagerModule.h>
+#include <MothershipModule.h>
 
 #include "LightControlModule.h"
 
@@ -54,6 +56,17 @@ void setup() {
   // kept as a safety net for any lib that later switches to
   // ESP_LOGI under the same tag.
   esp_log_level_set("AsyncMqttClient", ESP_LOG_WARN);
+
+  // arduino-esp32's NetworkClientSecure / ssl_client emits noisy
+  // ERROR-level lines on every TLS connection close — the post-
+  // response available() poll calls mbedtls_ssl_read on a socket
+  // the peer just closed and gets MBEDTLS_ERR_NET_RECV_FAILED
+  // (-0x004C / -76). Cosmetic — by the time it logs, the response
+  // body was already fully received. Silencing the two tags
+  // suppresses this without affecting real connect / handshake
+  // failures (which fire under different tags).
+  esp_log_level_set("ssl_client", ESP_LOG_NONE);
+  esp_log_level_set("NetworkClientSecure", ESP_LOG_NONE);
 
   app = ESPRack::Builder(&server, "ESPRackDemo", "v0.1.6-pre")
     // foundation: feature flags, UI manifest, presence registry
@@ -80,6 +93,8 @@ void setup() {
     .install<AutoUpdateModule>()
     .install<MqttModule>()
     .install<TelegramModule>()
+    .install<CertManagerModule>()
+    .install<MothershipModule>()
     // application
     .install<LightControlModule>()
     // actions
