@@ -68,7 +68,7 @@ void setup() {
   esp_log_level_set("ssl_client", ESP_LOG_NONE);
   esp_log_level_set("NetworkClientSecure", ESP_LOG_NONE);
 
-  app = ESPRack::Builder(&server, "ESPRackDemo", "v0.1.6-pre")
+  app = ESPRack::Builder(&server, FACTORY_PROJECT_NAME, FACTORY_PROJECT_VERSION)
     // foundation: feature flags, UI manifest, presence registry
     .install<FeaturesModule>()
     .install<UiDynModule>()

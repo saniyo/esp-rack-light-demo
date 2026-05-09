@@ -1,5 +1,15 @@
 """sync_ui.py — populate ./interface/ from canonical ../esp-rack/ui/.
 
+Convenience: the consumer drops a single PWA icon at
+    interface_overrides/public/app/icon.png
+and sync auto-generates the matching `favicon.ico` (PNG wrapped in an
+ICO container — every modern browser accepts that). A separate
+favicon.ico file is honoured if explicitly placed. If Pillow is
+available the icon is also auto-downscaled to TARGET_ICON_SIZE so a
+2048×2048 download doesn't bloat the firmware bundle by ~1 MB; the
+original in overrides/ is left untouched, only the copy that lands
+in interface/ gets resized.
+
 Architectural contract: the React frontend lives ONLY in the library
 (esp-rack/ui/). The demo has zero per-service React — every C++ service
 declares its UI via FormBuilder/WebFeatureSpec, and the library renders
@@ -12,9 +22,12 @@ project. Re-running is idempotent.
 
 The consumer can override individual files by dropping them under
 ./interface_overrides/ — that overlay is applied AFTER the library
-copy. Today no overrides exist; the hook is here for the rare case
-(custom favicon / project-specific theme tweak) without touching
-library files.
+copy. The script ALSO mirrors the lib's `public/` directory shape into
+./interface_overrides/ on first run, so the consumer sees pre-made
+empty target directories and knows where to drop project-branding
+assets (icon.png, favicon.ico, theme overrides) without first reading
+this source. Existing files inside overrides are NEVER touched — only
+missing dirs are created.
 
 Failure modes:
   * `../esp-rack/ui/` missing -> fail fast with a clear message.
@@ -25,6 +38,7 @@ Failure modes:
 from pathlib import Path
 from shutil import copy2, copytree, rmtree
 import os
+import struct
 import sys
 
 Import("env")  # noqa: F821  (PlatformIO injects)
@@ -150,6 +164,13 @@ def replace_dir(src: Path, dst: Path) -> None:
     copytree(src, dst)
 
 
+# Files that get image-aware copy (resize-if-too-large) instead of
+# verbatim copy2. Relative to the overlay root (interface_overrides/).
+RESIZE_ON_OVERLAY = {
+    "public/app/icon.png",
+}
+
+
 def overlay_dir(src: Path, dst: Path) -> None:
     if not src.exists():
         return
@@ -158,7 +179,161 @@ def overlay_dir(src: Path, dst: Path) -> None:
         target = dst / rel
         target.mkdir(parents=True, exist_ok=True)
         for f in files:
-            copy2(Path(cur) / f, target / f)
+            src_file = Path(cur) / f
+            dst_file = target / f
+            rel_key = (rel / f).as_posix()
+            if rel_key in RESIZE_ON_OVERLAY:
+                maybe_resize_png(src_file, dst_file)
+            else:
+                copy2(src_file, dst_file)
+
+
+# Per-file branding seeds — copied from lib into interface_overrides/
+# when the corresponding override is missing (first sync OR user
+# accidentally deleted the file). Existing overrides are NEVER
+# overwritten — the consumer's customised PNG / ICO stays put across
+# syncs. Restricted to branding-class assets: re-shipping index.html
+# or src/*.tsx would silently fork the lib UI and the consumer would
+# stop receiving framework UI updates without knowing it.
+#
+# favicon.ico intentionally NOT in this list — it's auto-derived from
+# icon.png via wrap_png_as_ico() so the consumer only needs to drop
+# one file. Place a separate favicon.ico in overrides explicitly to
+# override the auto-derived one.
+OVERRIDES_FILE_SEEDS = [
+    "public/app/icon.png",
+    "public/app/manifest.json",
+]
+
+
+# Target icon resolution — matches the largest entry declared in
+# ui/public/app/manifest.json (`sizes:"...256x256"`). Browser picks
+# down from this for smaller render contexts (Add to Home Screen,
+# tab favicon). Bumping past 256×256 inflates firmware by 4× per
+# step (PNG is roughly area-quadratic for solid art) for no visual
+# benefit on the typical screen DPI a smart-home dashboard sees.
+TARGET_ICON_SIZE = (256, 256)
+_pillow_warned = False
+
+
+def maybe_resize_png(src_path: Path, dst_path: Path) -> bool:
+    """Copy `src_path` → `dst_path`. If Pillow is available AND the
+    source is larger than TARGET_ICON_SIZE, downscale (preserving
+    aspect ratio) before writing. Returns True iff a resize actually
+    happened. On Pillow-absent systems the file is copied verbatim
+    and a one-time install-hint is printed.
+    """
+    global _pillow_warned
+    try:
+        from PIL import Image  # type: ignore
+    except ImportError:
+        # Bigger than 50 KB is the practical breakpoint where the
+        # firmware bundle starts to feel it. Below that the copy-as-is
+        # path is fine and we don't pester the user.
+        if (src_path.stat().st_size > 50 * 1024) and not _pillow_warned:
+            print(f"[sync_ui] WARN: {src_path.name} is "
+                  f"{src_path.stat().st_size // 1024} KB — "
+                  f"`pip install Pillow` to enable auto-downscale")
+            _pillow_warned = True
+        copy2(src_path, dst_path)
+        return False
+
+    img = Image.open(src_path)
+    if img.size[0] <= TARGET_ICON_SIZE[0] and img.size[1] <= TARGET_ICON_SIZE[1]:
+        copy2(src_path, dst_path)
+        return False
+
+    orig = img.size
+    # thumbnail() shrinks in-place preserving aspect; final image
+    # fits inside TARGET_ICON_SIZE. LANCZOS is the standard high-
+    # quality downsampling filter.
+    img.thumbnail(TARGET_ICON_SIZE, Image.LANCZOS)
+    # Force RGBA so transparent corners / alpha logos survive the
+    # save-roundtrip even if the source was indexed-PNG.
+    if img.mode != 'RGBA':
+        img = img.convert('RGBA')
+    img.save(dst_path, format='PNG', optimize=True)
+    print(f"[sync_ui] resized {src_path.name}: "
+          f"{orig[0]}×{orig[1]} -> {img.size[0]}×{img.size[1]}")
+    return True
+
+
+def wrap_png_as_ico(png_bytes: bytes) -> bytes:
+    """Wrap a single PNG payload in a 1-entry ICO container. Every
+    modern browser (Chrome/Edge/Firefox/Safari) reads the embedded PNG
+    directly — no rasterisation needed. The width/height byte fields
+    are reported as 64×64 because that's what 'most' icons end up at;
+    actual rendering uses the PNG's own dimensions.
+    """
+    ico_header = struct.pack('<HHH', 0, 1, 1)        # reserved=0, type=ICO, count=1
+    ico_dir = struct.pack('<BBBBHHII',
+        64,                # width  (0 means 256)
+        64,                # height
+        0,                 # color count
+        0,                 # reserved
+        1,                 # color planes
+        32,                # bits per pixel
+        len(png_bytes),    # size of image data
+        22)                # offset (header + 1 directory entry)
+    return ico_header + ico_dir + png_bytes
+
+
+def ensure_overrides_skeleton() -> None:
+    """Make ./interface_overrides/ self-bootstrap from the library:
+      1. Mirror lib `ui/public/` directory shape — missing dirs are
+         created, existing dirs left alone. Lib-driven: when the lib
+         adds public/fonts/, the consumer's overrides picks it up on
+         the next sync without editing this script.
+      2. Seed missing branding assets (OVERRIDES_FILE_SEEDS) by
+         copying the lib default into overrides. Idempotent per-file:
+         a customised override stays put; an accidentally deleted
+         override gets restored from lib on the next sync — so a
+         broken project always heals to a working default rather
+         than 404-ing on the missing favicon.
+    Never overwrites existing files. Never deletes anything from
+    overrides.
+    """
+    src_root = LIBRARY_UI / "public"
+    if not src_root.is_dir():
+        return
+    OVERRIDES_DIR.mkdir(parents=True, exist_ok=True)
+
+    created_dirs = 0
+    for cur, _dirs, _files in os.walk(src_root):
+        rel = Path(cur).relative_to(LIBRARY_UI)  # "public", "public/app", ...
+        target = OVERRIDES_DIR / rel
+        if not target.exists():
+            target.mkdir(parents=True, exist_ok=True)
+            created_dirs += 1
+
+    seeded_files = 0
+    for rel_path in OVERRIDES_FILE_SEEDS:
+        src = LIBRARY_UI / rel_path
+        dst = OVERRIDES_DIR / rel_path
+        if src.is_file() and not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            copy2(src, dst)
+            seeded_files += 1
+
+    # Auto-derive favicon.ico from icon.png unless the consumer placed
+    # an explicit favicon.ico already. Re-run when icon.png changes is
+    # NOT triggered here (that would clobber an explicit favicon —
+    # implicit derivation only fills a hole). Operator who customises
+    # icon.png and wants the favicon refreshed should `rm favicon.ico`
+    # and re-sync.
+    derived_favicon = False
+    icon_src = OVERRIDES_DIR / "public" / "app" / "icon.png"
+    favicon_dst = OVERRIDES_DIR / "public" / "favicon.ico"
+    if icon_src.is_file() and not favicon_dst.exists():
+        favicon_dst.parent.mkdir(parents=True, exist_ok=True)
+        favicon_dst.write_bytes(wrap_png_as_ico(icon_src.read_bytes()))
+        derived_favicon = True
+
+    if created_dirs or seeded_files or derived_favicon:
+        derived_str = ", favicon auto-derived" if derived_favicon else ""
+        print(f"[sync_ui] seeded interface_overrides/ "
+              f"({created_dirs} dir(s), {seeded_files} file(s)"
+              f"{derived_str}) — edit in place to customise")
 
 
 def sync() -> None:
@@ -166,6 +341,12 @@ def sync() -> None:
         fail(f"canonical UI not found at {LIBRARY_UI}; clone esp-rack as a sibling repo")
 
     INTERFACE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Make sure interface_overrides/ skeleton exists BEFORE the overlay
+    # step. First-run consumer thus gets empty target dirs created
+    # automatically (lib-driven shape); subsequent runs are no-ops if
+    # the skeleton is intact.
+    ensure_overrides_skeleton()
 
     for f in LIBRARY_PAYLOAD_FILES:
         src = LIBRARY_UI / f
